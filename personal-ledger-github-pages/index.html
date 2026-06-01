@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#1f7a6b" />
+    <title>明细记账</title>
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="rail">
+        <div>
+          <p class="eyebrow">本地优先</p>
+          <h1>明细记账</h1>
+        </div>
+        <label class="field">
+          <span>账本</span>
+          <select id="bookSelect"></select>
+        </label>
+        <nav class="nav" aria-label="主导航">
+          <button class="active" data-view="dashboard" type="button">总览</button>
+          <button data-view="entries" type="button">明细</button>
+          <button data-view="manage" type="button">设置</button>
+          <button data-view="backup" type="button">导出</button>
+        </nav>
+        <div class="sync-card">
+          <p>同步窗口</p>
+          <span>当前仅保存在本机。数据层已预留 Supabase / iCloud 接入字段。</span>
+        </div>
+      </aside>
+
+      <main class="workspace">
+        <section class="quick-entry" aria-label="快捷记账">
+          <div class="section-title">
+            <div>
+              <p class="eyebrow">快捷记一笔</p>
+              <h2 id="formTitle">新增支出</h2>
+            </div>
+            <div class="segmented">
+              <button class="active" id="expenseMode" type="button">支出</button>
+              <button id="incomeMode" type="button">收入</button>
+            </div>
+          </div>
+
+          <form id="transactionForm" class="entry-form">
+            <input type="hidden" id="editingId" />
+            <label class="amount-field">
+              <span>金额</span>
+              <input id="amountInput" inputmode="decimal" placeholder="0.00" required />
+            </label>
+            <label class="field">
+              <span>日期</span>
+              <input id="dateInput" type="date" required />
+            </label>
+            <label class="field">
+              <span>账户</span>
+              <select id="accountInput" required></select>
+            </label>
+            <label class="field">
+              <span>分类</span>
+              <select id="categoryInput" required></select>
+            </label>
+            <label class="field note-field">
+              <span>备注</span>
+              <textarea id="noteInput" rows="2" placeholder="可填写任意长度备注"></textarea>
+            </label>
+            <div class="form-actions">
+              <button class="primary" type="submit">保存</button>
+              <button id="resetForm" type="button">清空</button>
+            </div>
+          </form>
+        </section>
+
+        <section class="view active" id="dashboardView">
+          <div class="toolbar">
+            <div>
+              <p class="eyebrow">统计</p>
+              <h2>月度与年度总览</h2>
+            </div>
+            <input id="monthPicker" type="month" />
+          </div>
+          <div class="metric-grid">
+            <article class="metric income">
+              <span>本月收入</span>
+              <strong id="monthIncome">¥0.00</strong>
+            </article>
+            <article class="metric expense">
+              <span>本月支出</span>
+              <strong id="monthExpense">¥0.00</strong>
+            </article>
+            <article class="metric balance">
+              <span>本月结余</span>
+              <strong id="monthBalance">¥0.00</strong>
+            </article>
+            <article class="metric year">
+              <span>本年结余</span>
+              <strong id="yearBalance">¥0.00</strong>
+            </article>
+          </div>
+          <div class="analytics-grid">
+            <section class="panel">
+              <div class="panel-head">
+                <h3>分类支出</h3>
+                <span id="categoryHint">按当前月份</span>
+              </div>
+              <canvas id="categoryChart" width="640" height="320"></canvas>
+              <div id="categoryLegend" class="legend"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-head">
+                <h3>年度走势</h3>
+                <span id="yearHint">收入 / 支出</span>
+              </div>
+              <canvas id="yearChart" width="640" height="320"></canvas>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" id="entriesView">
+          <div class="toolbar">
+            <div>
+              <p class="eyebrow">流水</p>
+              <h2>交易列表</h2>
+            </div>
+            <button id="exportFiltered" type="button">导出当前筛选</button>
+          </div>
+          <div class="filters">
+            <input id="searchInput" placeholder="搜索分类、账户、备注" />
+            <select id="typeFilter">
+              <option value="all">全部类型</option>
+              <option value="expense">支出</option>
+              <option value="income">收入</option>
+            </select>
+            <select id="accountFilter"></select>
+            <select id="categoryFilter"></select>
+            <input id="fromDate" type="date" />
+            <input id="toDate" type="date" />
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>日期</th>
+                  <th>类型</th>
+                  <th>分类</th>
+                  <th>账户</th>
+                  <th>金额</th>
+                  <th>备注</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="transactionRows"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="view" id="manageView">
+          <div class="toolbar">
+            <div>
+              <p class="eyebrow">基础资料</p>
+              <h2>账本、账户与分类</h2>
+            </div>
+          </div>
+          <div class="manage-grid">
+            <section class="panel">
+              <h3>账本</h3>
+              <form class="inline-form" data-kind="book">
+                <input name="name" placeholder="新账本名称" required />
+                <button type="submit">新增</button>
+              </form>
+              <div id="bookList" class="pill-list"></div>
+            </section>
+            <section class="panel">
+              <h3>账户</h3>
+              <form class="inline-form" data-kind="account">
+                <input name="name" placeholder="账户名称" required />
+                <input name="note" placeholder="说明，可选" />
+                <button type="submit">新增</button>
+              </form>
+              <div id="accountList" class="pill-list"></div>
+            </section>
+            <section class="panel">
+              <h3>分类</h3>
+              <form class="inline-form category-form" data-kind="category">
+                <input name="name" placeholder="分类名称" required />
+                <select name="type">
+                  <option value="expense">支出</option>
+                  <option value="income">收入</option>
+                </select>
+                <button type="submit">新增</button>
+              </form>
+              <div id="categoryList" class="pill-list"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" id="backupView">
+          <div class="toolbar">
+            <div>
+              <p class="eyebrow">迁移与备份</p>
+              <h2>导出、备份、恢复</h2>
+            </div>
+          </div>
+          <div class="backup-grid">
+            <section class="panel">
+              <h3>CSV 导出</h3>
+              <p>导出当前账本的全部交易，或在明细页导出筛选结果。</p>
+              <button id="exportAll" class="primary" type="button">导出当前账本 CSV</button>
+            </section>
+            <section class="panel">
+              <h3>完整备份</h3>
+              <p>包含账本、账户、分类、交易和同步状态字段，适合换设备前保存。</p>
+              <div class="form-actions">
+                <button id="backupJson" type="button">下载备份</button>
+                <label class="file-button">
+                  恢复备份
+                  <input id="restoreJson" type="file" accept="application/json" />
+                </label>
+              </div>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+    <script src="./app.js"></script>
+  </body>
+</html>
