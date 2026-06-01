@@ -27,7 +27,8 @@
         </nav>
         <div class="sync-card">
           <p>同步窗口</p>
-          <span>当前仅保存在本机。数据层已预留 Supabase / iCloud 接入字段。</span>
+          <span id="syncStatus">当前仅保存在本机。配置 Supabase 后可多设备同步。</span>
+          <button id="manualSync" type="button">立即同步</button>
         </div>
       </aside>
 
@@ -205,9 +206,49 @@
           </div>
           <div class="backup-grid">
             <section class="panel">
+              <h3>Supabase 登录</h3>
+              <p>填写项目 URL 和 anon key 后，用同一个邮箱账号登录即可跨设备同步。</p>
+              <form id="supabaseConfigForm" class="sync-form">
+                <label class="field">
+                  <span>Project URL</span>
+                  <input id="supabaseUrl" placeholder="https://xxxx.supabase.co" />
+                </label>
+                <label class="field">
+                  <span>Anon public key</span>
+                  <textarea id="supabaseAnonKey" rows="3" placeholder="eyJ..."></textarea>
+                </label>
+                <button type="submit">保存配置</button>
+              </form>
+              <form id="authForm" class="sync-form">
+                <label class="field">
+                  <span>邮箱</span>
+                  <input id="authEmail" type="email" autocomplete="email" />
+                </label>
+                <label class="field">
+                  <span>密码</span>
+                  <input id="authPassword" type="password" autocomplete="current-password" />
+                </label>
+                <div class="form-actions">
+                  <button class="primary" data-auth-action="signin" type="submit">登录</button>
+                  <button data-auth-action="signup" type="submit">注册</button>
+                  <button id="signOut" type="button">退出</button>
+                </div>
+              </form>
+              <p id="authStatus">未登录</p>
+            </section>
+            <section class="panel">
               <h3>CSV 导出</h3>
               <p>导出当前账本的全部交易，或在明细页导出筛选结果。</p>
               <button id="exportAll" class="primary" type="button">导出当前账本 CSV</button>
+            </section>
+            <section class="panel">
+              <h3>CSV 导入</h3>
+              <p>支持表头：日期、类型、分类、账户、金额、备注。也兼容 date、type、category、account、amount、note。</p>
+              <label class="file-button">
+                选择 CSV
+                <input id="importCsv" type="file" accept=".csv,text/csv" />
+              </label>
+              <div id="importSummary" class="import-summary"></div>
             </section>
             <section class="panel">
               <h3>完整备份</h3>

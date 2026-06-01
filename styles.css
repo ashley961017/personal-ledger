@@ -154,6 +154,11 @@ textarea {
   background: #fff;
 }
 
+.sync-card button {
+  width: 100%;
+  margin-top: 12px;
+}
+
 .sync-card p {
   margin-bottom: 6px;
   font-weight: 800;
@@ -406,6 +411,19 @@ td.amount {
   inset: 0;
   opacity: 0;
   cursor: pointer;
+}
+
+.sync-form {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.import-summary {
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.6;
 }
 
 .empty {

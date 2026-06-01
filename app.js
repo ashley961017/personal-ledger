@@ -5,6 +5,9 @@ const CHART_COLORS = ["#1f7a6b", "#bd4b4b", "#2d6cdf", "#c48a22", "#7a4fb8", "#3
 
 const state = {
   db: null,
+  supabase: null,
+  session: null,
+  syncTimer: null,
   books: [],
   accounts: [],
   categories: [],
@@ -23,9 +26,11 @@ document.addEventListener("DOMContentLoaded", async () => {
   await ensureSeedData();
   await loadAll();
   applyLaunchShortcut();
+  await initSupabase();
   resetForm();
   render();
   registerServiceWorker();
+  startAutoSync();
 });
 
 function bindElements() {
@@ -34,7 +39,9 @@ function bindElements() {
     "accountInput", "categoryInput", "noteInput", "resetForm", "monthPicker", "monthIncome", "monthExpense",
     "monthBalance", "yearBalance", "categoryChart", "categoryLegend", "yearChart", "searchInput", "typeFilter",
     "accountFilter", "categoryFilter", "fromDate", "toDate", "transactionRows", "exportFiltered", "exportAll",
-    "backupJson", "restoreJson", "bookList", "accountList", "categoryList", "formTitle"
+    "backupJson", "restoreJson", "bookList", "accountList", "categoryList", "formTitle", "syncStatus",
+    "manualSync", "supabaseConfigForm", "supabaseUrl", "supabaseAnonKey", "authForm", "authEmail",
+    "authPassword", "signOut", "authStatus", "importCsv", "importSummary"
   ].forEach((id) => {
     els[id] = document.getElementById(id);
   });
@@ -67,6 +74,11 @@ function bindEvents() {
   els.exportAll.addEventListener("click", () => exportCsv(currentBookTransactions(), "book-transactions"));
   els.backupJson.addEventListener("click", backupJson);
   els.restoreJson.addEventListener("change", restoreJson);
+  els.importCsv.addEventListener("change", importCsv);
+  els.manualSync.addEventListener("click", () => syncNow({ manual: true }));
+  els.supabaseConfigForm.addEventListener("submit", saveSupabaseConfig);
+  els.authForm.addEventListener("submit", handleAuth);
+  els.signOut.addEventListener("click", signOut);
 
   document.querySelectorAll(".inline-form").forEach((form) => {
     form.addEventListener("submit", addEntity);
@@ -177,6 +189,7 @@ function render() {
   renderDashboard();
   renderTransactions();
   renderManage();
+  renderSync();
   renderViews();
 }
 
@@ -271,6 +284,24 @@ function renderManage() {
   });
 }
 
+function renderSync() {
+  const email = state.session?.user?.email;
+  const configured = Boolean(state.supabase);
+  const pending = ["books", "accounts", "categories", "transactions"].reduce((count, storeName) => {
+    const rows = storeName === "books" ? state.books : storeName === "accounts" ? state.accounts : storeName === "categories" ? state.categories : state.transactions;
+    return count + rows.filter((item) => item.syncStatus === "pending").length;
+  }, 0);
+  if (els.syncStatus) {
+    els.syncStatus.textContent = email ? `已登录 ${email}。待同步 ${pending} 条。` : configured ? "Supabase 已配置，请登录后同步。" : "当前仅保存在本机。配置 Supabase 后可多设备同步。";
+  }
+  if (els.authStatus) {
+    els.authStatus.textContent = email ? `已登录：${email}` : "未登录";
+  }
+  if (els.manualSync) {
+    els.manualSync.disabled = !state.supabase || !state.session;
+  }
+}
+
 function renderViews() {
   document.querySelectorAll("[data-view]").forEach((button) => button.classList.toggle("active", button.dataset.view === state.view));
   document.querySelectorAll(".view").forEach((view) => view.classList.remove("active"));
@@ -358,6 +389,10 @@ async function addEntity(event) {
 async function deleteEntity(storeName, entityId) {
   if (storeName === "books" && state.books.length <= 1) {
     alert("至少保留一个账本");
+    return;
+  }
+  if (storeName === "books" && state.transactions.some((item) => item.bookId === entityId)) {
+    alert("该账本已有交易记录，暂不能删除。");
     return;
   }
   if ((storeName === "accounts" && inUse("accountId", entityId)) || (storeName === "categories" && inUse("categoryId", entityId))) {
@@ -571,6 +606,399 @@ async function restoreJson(event) {
   event.target.value = "";
 }
 
+async function importCsv(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  try {
+    const text = await file.text();
+    const rows = parseCsv(text);
+    if (rows.length < 2) throw new Error("CSV 没有可导入的数据");
+    const header = rows[0].map(normalizeHeader);
+    const imported = [];
+    let skipped = 0;
+    const accountCache = new Map(currentAccounts().map((item) => [item.name, item]));
+    const categoryCache = new Map(currentCategories().map((item) => [`${item.type}:${item.name}`, item]));
+    for (const rawRow of rows.slice(1)) {
+      if (!rawRow.some((cell) => String(cell || "").trim())) continue;
+      const row = Object.fromEntries(header.map((key, index) => [key, rawRow[index] || ""]));
+      const normalized = normalizeCsvTransaction(row);
+      if (!normalized) {
+        skipped += 1;
+        continue;
+      }
+      const account = await ensureImportedAccount(normalized.accountName, accountCache);
+      const category = await ensureImportedCategory(normalized.categoryName, normalized.type, categoryCache);
+      imported.push(withSync({
+        id: id(),
+        bookId: state.currentBookId,
+        accountId: account.id,
+        categoryId: category.id,
+        type: normalized.type,
+        amount: normalized.amount,
+        date: normalized.date,
+        note: normalized.note,
+        createdAt: now(),
+        updatedAt: now()
+      }));
+    }
+    if (!imported.length) throw new Error("没有识别到有效交易。请确认表头包含日期、金额等字段。");
+    if (!confirm(`将导入 ${imported.length} 条记录到当前账本，跳过 ${skipped} 行。继续吗？`)) return;
+    for (const item of imported) await put("transactions", item);
+    await loadAll();
+    render();
+    if (els.importSummary) els.importSummary.textContent = `已导入 ${imported.length} 条记录，跳过 ${skipped} 行。`;
+    syncNow({ manual: false });
+  } catch (error) {
+    alert(`CSV 导入失败：${error.message}`);
+  } finally {
+    event.target.value = "";
+  }
+}
+
+function parseCsv(text) {
+  const clean = text.replace(/^\ufeff/, "");
+  const rows = [];
+  let row = [];
+  let cell = "";
+  let quoted = false;
+  for (let index = 0; index < clean.length; index += 1) {
+    const char = clean[index];
+    const next = clean[index + 1];
+    if (quoted) {
+      if (char === '"' && next === '"') {
+        cell += '"';
+        index += 1;
+      } else if (char === '"') {
+        quoted = false;
+      } else {
+        cell += char;
+      }
+      continue;
+    }
+    if (char === '"') {
+      quoted = true;
+    } else if (char === ",") {
+      row.push(cell);
+      cell = "";
+    } else if (char === "\n") {
+      row.push(cell);
+      rows.push(row);
+      row = [];
+      cell = "";
+    } else if (char !== "\r") {
+      cell += char;
+    }
+  }
+  row.push(cell);
+  rows.push(row);
+  return rows.filter((items) => items.some((item) => String(item || "").trim()));
+}
+
+function normalizeHeader(value) {
+  const key = String(value || "").trim().toLowerCase();
+  const map = {
+    "账本": "book",
+    "日期": "date",
+    "交易日期": "date",
+    "时间": "date",
+    "类型": "type",
+    "收支": "type",
+    "分类": "category",
+    "账户": "account",
+    "支付账户": "account",
+    "金额": "amount",
+    "收入": "incomeAmount",
+    "支出": "expenseAmount",
+    "备注": "note",
+    "说明": "note",
+    "date": "date",
+    "type": "type",
+    "category": "category",
+    "account": "account",
+    "amount": "amount",
+    "note": "note"
+  };
+  return map[key] || key;
+}
+
+function normalizeCsvTransaction(row) {
+  const date = normalizeDate(row.date);
+  const note = String(row.note || "").trim();
+  let amount = parseAmount(row.amount);
+  let type = normalizeType(row.type);
+  const incomeAmount = parseAmount(row.incomeAmount);
+  const expenseAmount = parseAmount(row.expenseAmount);
+  if (!amount && incomeAmount) {
+    amount = incomeAmount;
+    type = "income";
+  }
+  if (!amount && expenseAmount) {
+    amount = expenseAmount;
+    type = "expense";
+  }
+  if (!type && amount < 0) type = "expense";
+  if (!type) type = "expense";
+  amount = Math.abs(amount);
+  if (!date || !amount) return null;
+  return {
+    date,
+    type,
+    amount: Math.round(amount * 100) / 100,
+    accountName: String(row.account || "默认账户").trim() || "默认账户",
+    categoryName: String(row.category || (type === "income" ? "其他收入" : "其他")).trim() || (type === "income" ? "其他收入" : "其他"),
+    note
+  };
+}
+
+function normalizeType(value) {
+  const text = String(value || "").trim().toLowerCase();
+  if (["收入", "入账", "income", "in"].includes(text)) return "income";
+  if (["支出", "出账", "expense", "out"].includes(text)) return "expense";
+  return "";
+}
+
+function parseAmount(value) {
+  const text = String(value || "").replaceAll(",", "").replace(/[¥￥\s]/g, "");
+  const amount = Number(text);
+  return Number.isFinite(amount) ? amount : 0;
+}
+
+function normalizeDate(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  const match = text.match(/^(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})/);
+  if (match) return `${match[1]}-${match[2].padStart(2, "0")}-${match[3].padStart(2, "0")}`;
+  const parsed = new Date(text);
+  return Number.isNaN(parsed.getTime()) ? "" : dateKey(parsed);
+}
+
+async function ensureImportedAccount(name, cache) {
+  if (cache.has(name)) return cache.get(name);
+  const account = withSync({ id: id(), bookId: state.currentBookId, name, note: "CSV 导入创建", createdAt: now(), updatedAt: now() });
+  await put("accounts", account);
+  cache.set(name, account);
+  return account;
+}
+
+async function ensureImportedCategory(name, type, cache) {
+  const key = `${type}:${name}`;
+  if (cache.has(key)) return cache.get(key);
+  const category = withSync({ id: id(), bookId: state.currentBookId, name, type, createdAt: now(), updatedAt: now() });
+  await put("categories", category);
+  cache.set(key, category);
+  return category;
+}
+
+async function initSupabase() {
+  const [urlSetting, keySetting] = await Promise.all([
+    get("settings", "supabaseUrl"),
+    get("settings", "supabaseAnonKey")
+  ]);
+  const supabaseUrl = urlSetting?.value || "";
+  const supabaseAnonKey = keySetting?.value || "";
+  if (els.supabaseUrl) els.supabaseUrl.value = supabaseUrl;
+  if (els.supabaseAnonKey) els.supabaseAnonKey.value = supabaseAnonKey;
+  if (!supabaseUrl || !supabaseAnonKey) return;
+  try {
+    const { createClient } = await import("https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm");
+    state.supabase = createClient(supabaseUrl, supabaseAnonKey);
+    const { data } = await state.supabase.auth.getSession();
+    state.session = data.session;
+    state.supabase.auth.onAuthStateChange((_event, session) => {
+      state.session = session;
+      renderSync();
+      if (session) syncNow({ manual: false });
+    });
+  } catch (error) {
+    setSyncStatus(`Supabase 初始化失败：${error.message}`);
+  }
+}
+
+async function saveSupabaseConfig(event) {
+  event.preventDefault();
+  await put("settings", { key: "supabaseUrl", value: els.supabaseUrl.value.trim() });
+  await put("settings", { key: "supabaseAnonKey", value: els.supabaseAnonKey.value.trim() });
+  state.supabase = null;
+  state.session = null;
+  await initSupabase();
+  renderSync();
+  alert("Supabase 配置已保存");
+}
+
+async function handleAuth(event) {
+  event.preventDefault();
+  if (!state.supabase) {
+    alert("请先保存 Supabase 配置");
+    return;
+  }
+  const action = event.submitter?.dataset.authAction;
+  const email = els.authEmail.value.trim();
+  const password = els.authPassword.value;
+  if (!email || !password) {
+    alert("请输入邮箱和密码");
+    return;
+  }
+  const request = action === "signup"
+    ? state.supabase.auth.signUp({ email, password })
+    : state.supabase.auth.signInWithPassword({ email, password });
+  const { data, error } = await request;
+  if (error) {
+    alert(error.message);
+    return;
+  }
+  state.session = data.session || state.session;
+  renderSync();
+  if (action === "signup" && !data.session) {
+    alert("注册成功。请查看邮箱确认链接后再登录。");
+    return;
+  }
+  await syncNow({ manual: true });
+}
+
+async function signOut() {
+  if (!state.supabase) return;
+  await state.supabase.auth.signOut();
+  state.session = null;
+  renderSync();
+}
+
+function startAutoSync() {
+  window.addEventListener("online", () => syncNow({ manual: false }));
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) syncNow({ manual: false });
+  });
+  state.syncTimer = window.setInterval(() => syncNow({ manual: false }), 60000);
+  syncNow({ manual: false });
+}
+
+async function syncNow({ manual }) {
+  if (!state.supabase || !state.session) return;
+  try {
+    setSyncStatus("正在同步...");
+    await discardStarterDataIfRemoteExists();
+    await pullRemote();
+    await uploadPending();
+    await pullRemote();
+    await put("sync_state", { id: "supabase", provider: "supabase", lastSyncAt: now(), status: "ok" });
+    await loadAll();
+    render();
+    setSyncStatus(`同步完成：${new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}`);
+  } catch (error) {
+    setSyncStatus(`同步失败：${error.message}`);
+    if (manual) alert(`同步失败：${error.message}`);
+  }
+}
+
+async function discardStarterDataIfRemoteExists() {
+  const [{ data, error }, localTransactions, localBooks, localAccounts, localCategories] = await Promise.all([
+    state.supabase.from("books").select("id").limit(1),
+    getAll("transactions"),
+    getAll("books"),
+    getAll("accounts"),
+    getAll("categories")
+  ]);
+  if (error) throw error;
+  const remoteHasData = Boolean(data?.length);
+  const localHasUserData = localTransactions.length > 0 || [...localBooks, ...localAccounts, ...localCategories].some((item) => item.syncStatus === "synced");
+  if (!remoteHasData || localHasUserData) return;
+  await clearStore("books");
+  await clearStore("accounts");
+  await clearStore("categories");
+}
+
+async function uploadPending() {
+  for (const storeName of ["books", "accounts", "categories", "transactions"]) {
+    const rows = (await getAll(storeName)).filter((item) => item.syncStatus === "pending");
+    if (!rows.length) continue;
+    const payload = rows.map((item) => toRemote(storeName, item, state.session.user.id));
+    const { error } = await state.supabase.from(storeName).upsert(payload, { onConflict: "id" });
+    if (error) throw error;
+    for (const item of rows) {
+      await put(storeName, { ...item, syncStatus: "synced", remoteId: item.id, syncProvider: "supabase" });
+    }
+  }
+}
+
+async function pullRemote() {
+  for (const storeName of ["books", "accounts", "categories", "transactions"]) {
+    const { data, error } = await state.supabase.from(storeName).select("*");
+    if (error) throw error;
+    const localRows = await getAll(storeName);
+    const localById = new Map(localRows.map((item) => [item.id, item]));
+    for (const remote of data || []) {
+      const incoming = fromRemote(storeName, remote);
+      const local = localById.get(incoming.id);
+      const localDirty = local?.syncStatus === "pending";
+      const remoteIsNewer = !local || String(incoming.updatedAt || "") >= String(local.updatedAt || "");
+      if (!localDirty || remoteIsNewer) await put(storeName, incoming);
+    }
+  }
+}
+
+function toRemote(storeName, item, userId) {
+  const base = {
+    id: item.id,
+    user_id: userId,
+    name: item.name,
+    created_at: item.createdAt,
+    updated_at: item.updatedAt,
+    deleted_at: item.deletedAt || null
+  };
+  if (storeName === "books") return base;
+  if (storeName === "accounts") return { ...base, book_id: item.bookId, note: item.note || "" };
+  if (storeName === "categories") return { ...base, book_id: item.bookId, type: item.type };
+  return {
+    id: item.id,
+    user_id: userId,
+    book_id: item.bookId,
+    account_id: item.accountId,
+    category_id: item.categoryId,
+    type: item.type,
+    amount: item.amount,
+    date: item.date,
+    note: item.note || "",
+    created_at: item.createdAt,
+    updated_at: item.updatedAt,
+    deleted_at: item.deletedAt || null
+  };
+}
+
+function fromRemote(storeName, row) {
+  const base = withSync({
+    id: row.id,
+    name: row.name,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    deletedAt: row.deleted_at || null
+  });
+  base.syncStatus = "synced";
+  base.remoteId = row.id;
+  base.syncProvider = "supabase";
+  if (storeName === "books") return base;
+  if (storeName === "accounts") return { ...base, bookId: row.book_id, note: row.note || "" };
+  if (storeName === "categories") return { ...base, bookId: row.book_id, type: row.type };
+  return {
+    id: row.id,
+    bookId: row.book_id,
+    accountId: row.account_id,
+    categoryId: row.category_id,
+    type: row.type,
+    amount: Number(row.amount),
+    date: row.date,
+    note: row.note || "",
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    deletedAt: row.deleted_at || null,
+    syncStatus: "synced",
+    remoteId: row.id,
+    syncProvider: "supabase"
+  };
+}
+
+function setSyncStatus(message) {
+  if (els.syncStatus) els.syncStatus.textContent = message;
+}
+
 function download(filename, content, mimeType) {
   const blob = new Blob(["\ufeff", content], { type: mimeType });
   const url = URL.createObjectURL(blob);
@@ -631,11 +1059,11 @@ function now() {
 }
 
 function dateKey(date) {
-  return date.toISOString().slice(0, 10);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
 
 function monthKey(date) {
-  return date.toISOString().slice(0, 7);
+  return dateKey(date).slice(0, 7);
 }
 
 function money(value) {
